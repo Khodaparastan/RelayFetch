@@ -17,6 +17,13 @@ function load_css(): string
 
 function bail(int $code, string $title, string $message): void
 {
+  // If request logging is active, persist the real error status/message
+  // so the shutdown logger does not misclassify this as a 500.
+  if (isset($GLOBALS["RELAYFETCH_LOG_RECORD"]) && is_array($GLOBALS["RELAYFETCH_LOG_RECORD"])) {
+    $GLOBALS["RELAYFETCH_LOG_RECORD"]["status"] = $code;
+    $GLOBALS["RELAYFETCH_LOG_RECORD"]["error"] = $title . ": " . $message;
+  }
+
   http_response_code($code);
   $safeTitle = htmlspecialchars($title);
   $safeMessage = htmlspecialchars($message);
@@ -43,6 +50,91 @@ function bail(int $code, string $title, string $message): void
   HTML;
 
   exit();
+}
+
+/**
+ * Redact sensitive query parameters and URL credentials before logging.
+ */
+function redact_url_secrets(string $url): string
+{
+  $parts = parse_url($url);
+  if ($parts === false) {
+    return $url;
+  }
+
+  $query = [];
+  if (!empty($parts["query"])) {
+    parse_str($parts["query"], $query);
+    $secretKeys = ["token", "apikey", "api_key", "key", "secret", "auth", "sig", "signature", "password", "pass", "access_token", "client_secret"];
+    foreach ($secretKeys as $k) {
+      if (array_key_exists($k, $query)) {
+        $query[$k] = "[REDACTED]";
+      }
+    }
+  }
+
+  $scheme = isset($parts["scheme"]) ? $parts["scheme"] . "://" : "";
+  // Redact URL userinfo (user:pass@host)
+  $auth = "";
+  if (isset($parts["user"])) {
+    $auth = "[REDACTED]";
+    if (isset($parts["pass"])) {
+      $auth .= ":" . "[REDACTED]";
+    }
+    $auth .= "@";
+  }
+  $host = $parts["host"] ?? "";
+  $port = isset($parts["port"]) ? ":" . $parts["port"] : "";
+  $path = $parts["path"] ?? "";
+  $qs = !empty($query) ? "?" . http_build_query($query) : (isset($parts["query"]) ? "?" . $parts["query"] : "");
+  $frag = isset($parts["fragment"]) ? "#" . $parts["fragment"] : "";
+
+  return $scheme . $auth . $host . $port . $path . $qs . $frag;
+}
+
+/**
+ * Resolve the client IP address, respecting common proxy headers when present.
+ */
+function resolve_client_ip(): string
+{
+  // Trust X-Forwarded-For only if explicitly configured; default to REMOTE_ADDR.
+  $remoteAddr = $_SERVER["REMOTE_ADDR"] ?? "";
+  $xff = trim($_SERVER["HTTP_X_FORWARDED_FOR"] ?? "");
+  if ($xff !== "") {
+    // Take the leftmost (client) entry from the XFF chain.
+    $first = trim(explode(",", $xff)[0]);
+    if (filter_var($first, FILTER_VALIDATE_IP) !== false) {
+      return $first;
+    }
+  }
+  return $remoteAddr;
+}
+
+/**
+ * Resolve a human-readable label for the token used in this request.
+ * Returns the token label if found, "anonymous" if no token required,
+ * or "unknown" if a token was provided but not matched.
+ */
+function resolve_token_label(): string
+{
+  if (!defined("SECRET_TOKEN") || SECRET_TOKEN === "") {
+    return "anonymous";
+  }
+  $headerToken = $_SERVER["HTTP_X_TOKEN"] ?? "";
+  $queryToken  = $_GET["token"] ?? "";
+  $provided    = $headerToken !== "" ? $headerToken : $queryToken;
+  if ($provided === "") {
+    return "anonymous";
+  }
+  // Look up label from token store if available.
+  if (function_exists("tokens_list")) {
+    foreach (tokens_list() as $t) {
+      if (isset($t["token"]) && hash_equals($t["token"], $provided)) {
+        return $t["label"] ?? "token";
+      }
+    }
+  }
+  return "token";
 }
 
 /**

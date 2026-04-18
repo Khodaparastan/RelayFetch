@@ -18,8 +18,8 @@ function validate_url(string $url): array
   $parsed = parse_url($url);
   $host = strtolower($parsed["host"] ?? "");
 
-  // Block loopback hostnames
-  $ssrfBlockedHosts = ["localhost", "ip6-localhost", "ip6-loopback"];
+  // Block loopback hostnames and literal IPv6 loopback address.
+  $ssrfBlockedHosts = ["localhost", "ip6-localhost", "ip6-loopback", "::1"];
   if (in_array($host, $ssrfBlockedHosts, true)) {
     bail(400, "Bad Request", "Requests to that host are not allowed.");
   }
@@ -82,12 +82,92 @@ function validate_url(string $url): array
 }
 
 /**
+ * Re-validate the host after redirects and return updated security context.
+ * If $effectiveUrl has a different host than $originalHost, the new host is
+ * fully SSRF-checked (all DNS records, private-range filter, optional
+ * whitelist, blocked extensions). Calls bail() on any violation.
+ *
+ * Returns ['host' => string, 'resolvedIp' => string] — either the original
+ * values (no redirect) or the newly validated ones.
+ */
+function revalidate_redirect(
+  string $effectiveUrl,
+  string $originalHost,
+  string $originalIp,
+): array {
+  $effectiveHost = strtolower(parse_url($effectiveUrl, PHP_URL_HOST) ?? "");
+
+  if ($effectiveHost === "" || $effectiveHost === $originalHost) {
+    return ["host" => $originalHost, "resolvedIp" => $originalIp];
+  }
+
+  // Block loopback hostnames and literal IPv6 loopback on the redirect target.
+  $ssrfBlockedHosts = ["localhost", "ip6-localhost", "ip6-loopback", "::1"];
+  if (in_array($effectiveHost, $ssrfBlockedHosts, true)) {
+    bail(400, "Bad Request", "Redirect target host is not allowed.");
+  }
+
+  // Resolve ALL addresses for the redirect host and block if any is private.
+  $dnsRecords = @dns_get_record($effectiveHost, DNS_A | DNS_AAAA);
+  if (empty($dnsRecords)) {
+    $fallback = gethostbyname($effectiveHost);
+    if ($fallback === $effectiveHost) {
+      bail(400, "Bad Request", "Could not resolve the redirect target hostname.");
+    }
+    $dnsRecords = [["type" => "A", "ip" => $fallback]];
+  }
+
+  $resolvedIp = null;
+  foreach ($dnsRecords as $rec) {
+    $ip = $rec["ip"] ?? $rec["ipv6"] ?? null;
+    if ($ip === null) {
+      continue;
+    }
+    if (
+      filter_var(
+        $ip,
+        FILTER_VALIDATE_IP,
+        FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE,
+      ) === false
+    ) {
+      bail(
+        400,
+        "Bad Request",
+        "Redirect target resolves to a private or reserved IP address.",
+      );
+    }
+    if ($resolvedIp === null) {
+      $resolvedIp = $ip;
+    }
+  }
+
+  if ($resolvedIp === null) {
+    bail(400, "Bad Request", "Could not resolve the redirect target to a public IP.");
+  }
+
+  // Optional host whitelist applies to redirect targets too.
+  if (!empty(ALLOWED_HOSTS) && !in_array($effectiveHost, ALLOWED_HOSTS, true)) {
+    bail(403, "Forbidden", "Redirect target host is not on the allowed list.");
+  }
+
+  // Block dangerous extensions on the final URL path.
+  $urlPath = parse_url($effectiveUrl, PHP_URL_PATH) ?? "";
+  $urlExt  = strtolower(ltrim(pathinfo($urlPath, PATHINFO_EXTENSION), "."));
+  if (in_array($urlExt, BLOCKED_EXTENSIONS, true)) {
+    bail(400, "Bad Request", "Redirect target file type is not allowed.");
+  }
+
+  return ["host" => $effectiveHost, "resolvedIp" => $resolvedIp];
+}
+
+/**
  * Verify the secret token if SECRET_TOKEN is defined.
  * Accepts the token via X-Token request header or ?token= query parameter.
  */
 function verify_token(): void
 {
-  if (!defined("SECRET_TOKEN")) {
+  // If no token is configured (or it's empty), auth is disabled.
+  if (!defined("SECRET_TOKEN") || SECRET_TOKEN === "") {
     return;
   }
 

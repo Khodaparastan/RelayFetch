@@ -29,11 +29,14 @@ function head_probe(string $url, string $host, string $resolvedIp): array
     CURLOPT_FOLLOWLOCATION => true,
     CURLOPT_MAXREDIRS => MAX_REDIRECTS,
     CURLOPT_TIMEOUT => HEAD_TIMEOUT,
-    CURLOPT_SSL_VERIFYPEER => true,
-    CURLOPT_SSL_VERIFYHOST => 2,
+    CURLOPT_SSL_VERIFYPEER => SSL_VERIFY_PEER,
+    CURLOPT_SSL_VERIFYHOST => SSL_VERIFY_PEER ? 2 : 0,
     CURLOPT_USERAGENT => USER_AGENT,
     CURLOPT_RESOLVE => build_resolve_pins($host, $resolvedIp, $urlPort),
   ]);
+  if (defined("SSL_CAINFO") && SSL_CAINFO !== "") {
+    curl_setopt($ch, CURLOPT_CAINFO, SSL_CAINFO);
+  }
   curl_exec($ch);
 
   $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -50,8 +53,38 @@ function head_probe(string $url, string $host, string $resolvedIp): array
       "Could not reach the remote server: " . htmlspecialchars($error),
     );
   }
-  if ($httpCode !== 200) {
-    bail(502, "Bad Gateway", "Remote server responded with HTTP {$httpCode}.");
+
+  // Some servers reject HEAD (405) or return non-200 for valid resources.
+  // Fall back to a lightweight GET with an early abort to get metadata.
+  if ($httpCode === 405 || ($httpCode !== 200 && $httpCode !== 206)) {
+    $chGet = curl_init($url);
+    curl_setopt_array($chGet, [
+      CURLOPT_RETURNTRANSFER => true,
+      CURLOPT_FOLLOWLOCATION => true,
+      CURLOPT_MAXREDIRS => MAX_REDIRECTS,
+      CURLOPT_TIMEOUT => HEAD_TIMEOUT,
+      CURLOPT_SSL_VERIFYPEER => SSL_VERIFY_PEER,
+      CURLOPT_SSL_VERIFYHOST => SSL_VERIFY_PEER ? 2 : 0,
+      CURLOPT_USERAGENT => USER_AGENT,
+      CURLOPT_RESOLVE => build_resolve_pins($host, $resolvedIp, $urlPort),
+      CURLOPT_RANGE => "0-0", // fetch only first byte
+    ]);
+    if (defined("SSL_CAINFO") && SSL_CAINFO !== "") {
+      curl_setopt($chGet, CURLOPT_CAINFO, SSL_CAINFO);
+    }
+    curl_exec($chGet);
+    $httpCode    = (int) curl_getinfo($chGet, CURLINFO_HTTP_CODE);
+    $contentType = curl_getinfo($chGet, CURLINFO_CONTENT_TYPE) ?: $contentType;
+    $effectiveUrl = curl_getinfo($chGet, CURLINFO_EFFECTIVE_URL) ?: $effectiveUrl;
+    $errorGet    = curl_error($chGet);
+    curl_close($chGet);
+    if (!empty($errorGet)) {
+      bail(502, "Bad Gateway", "Could not reach the remote server: " . htmlspecialchars($errorGet));
+    }
+    // Accept 200 or 206 (partial) as success from the GET fallback.
+    if ($httpCode !== 200 && $httpCode !== 206) {
+      bail(502, "Bad Gateway", "Remote server responded with HTTP {$httpCode}.");
+    }
   }
 
   // Enforce optional size cap before streaming begins.
@@ -84,11 +117,14 @@ function fetch_filename_from_headers(
     CURLOPT_FOLLOWLOCATION => true,
     CURLOPT_MAXREDIRS => MAX_REDIRECTS,
     CURLOPT_TIMEOUT => HEAD_TIMEOUT,
-    CURLOPT_SSL_VERIFYPEER => true,
-    CURLOPT_SSL_VERIFYHOST => 2,
+    CURLOPT_SSL_VERIFYPEER => SSL_VERIFY_PEER,
+    CURLOPT_SSL_VERIFYHOST => SSL_VERIFY_PEER ? 2 : 0,
     CURLOPT_USERAGENT => USER_AGENT,
     CURLOPT_RESOLVE => build_resolve_pins($host, $resolvedIp, $urlPort),
   ]);
+  if (defined("SSL_CAINFO") && SSL_CAINFO !== "") {
+    curl_setopt($ch, CURLOPT_CAINFO, SSL_CAINFO);
+  }
   $rawHeaders = curl_exec($ch);
   curl_close($ch);
 
@@ -116,27 +152,7 @@ function stream_file(
   string $filename,
   string $mimeType,
   int $contentLength,
-): void {
-  // Re-validate the effective URL's host after redirects to prevent SSRF via
-  // open redirects pointing to internal addresses.
-  $effectiveHost = strtolower(parse_url($effectiveUrl, PHP_URL_HOST) ?? "");
-  if ($effectiveHost !== $host) {
-    // The redirect landed on a different host — re-check it is public.
-    $ip = gethostbyname($effectiveHost);
-    if (
-      $ip === $effectiveHost ||
-      filter_var(
-        $ip,
-        FILTER_VALIDATE_IP,
-        FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE,
-      ) === false
-    ) {
-      bail(400, "Bad Request", "Redirect target is not allowed.");
-    }
-    $host       = $effectiveHost;
-    $resolvedIp = $ip;
-  }
-
+): int {
   $isRangeRequest = isset($_SERVER["HTTP_RANGE"]);
   $rangeHeader = $isRangeRequest ? $_SERVER["HTTP_RANGE"] : "";
 
@@ -165,37 +181,47 @@ function stream_file(
     header("Content-Length: " . $contentLength);
   }
 
+  $bytesStreamed = 0;
   $out = fopen("php://output", "wb");
   $dlCh = curl_init($effectiveUrl);
 
+  $actualHttpStatus = 200;
   $opts = [
-    CURLOPT_FOLLOWLOCATION => true,
-    CURLOPT_MAXREDIRS => MAX_REDIRECTS,
+    CURLOPT_FOLLOWLOCATION => false, // redirects already resolved via HEAD + revalidate_redirect
     CURLOPT_TIMEOUT => DL_TIMEOUT,
-    CURLOPT_SSL_VERIFYPEER => true,
-    CURLOPT_SSL_VERIFYHOST => 2,
+    CURLOPT_LOW_SPEED_LIMIT => DL_LOW_SPEED_LIMIT,
+    CURLOPT_LOW_SPEED_TIME => DL_LOW_SPEED_TIME,
+    CURLOPT_SSL_VERIFYPEER => SSL_VERIFY_PEER,
+    CURLOPT_SSL_VERIFYHOST => SSL_VERIFY_PEER ? 2 : 0,
     CURLOPT_USERAGENT => USER_AGENT,
     CURLOPT_HEADER => false,
     CURLOPT_BUFFERSIZE => CHUNK_SIZE,
+    CURLOPT_MAX_RECV_SPEED_LARGE => 0, // 0 = unlimited download speed
     CURLOPT_ENCODING => "",
     CURLOPT_RESOLVE => build_resolve_pins(
       $host,
       $resolvedIp,
       (int) (parse_url($effectiveUrl, PHP_URL_PORT) ?? 0) ?: null,
     ),
-    CURLOPT_WRITEFUNCTION => static function ($ch, $chunk) use ($out): int {
+    CURLOPT_WRITEFUNCTION => static function ($ch, $chunk) use ($out, &$bytesStreamed): int {
       $written = fwrite($out, $chunk);
       flush();
-      return $written === false ? 0 : strlen($chunk);
+      $len = $written === false ? 0 : strlen($chunk);
+      $bytesStreamed += $len;
+      return $len;
     },
     CURLOPT_HEADERFUNCTION => static function ($ch, $header) use (
       $isRangeRequest,
+      &$actualHttpStatus,
     ): int {
+      if (preg_match("/^HTTP\/[\d.]+ (\d+)/i", $header, $m)) {
+        $actualHttpStatus = (int) $m[1];
+      }
       if ($isRangeRequest) {
         if (preg_match("/^(Content-Range|Content-Length):/i", $header)) {
           header(trim($header));
         }
-        if (preg_match("/^HTTP\/[\d.]+ 206/i", $header)) {
+        if ($actualHttpStatus === 206) {
           http_response_code(206);
         }
       }
@@ -214,6 +240,9 @@ function stream_file(
   }
 
   curl_setopt_array($dlCh, $opts);
+  if (defined("SSL_CAINFO") && SSL_CAINFO !== "") {
+    curl_setopt($dlCh, CURLOPT_CAINFO, SSL_CAINFO);
+  }
 
   $ok = curl_exec($dlCh);
   $error = curl_error($dlCh);
@@ -223,4 +252,6 @@ function stream_file(
   if (!$ok || !empty($error)) {
     error_log("[Downloader] Stream error for {$effectiveUrl} — {$error}");
   }
+
+  return ["bytes" => $bytesStreamed, "status" => $actualHttpStatus];
 }

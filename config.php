@@ -74,3 +74,8 @@ define("CACHE_DEFAULT_TTL", 300); // seconds
 
 // ── Data dir ──────────────────────────────────────────────────────────────────
 define("DATA_DIR", __DIR__ . "/data");
+
+// ── Proxy / network ───────────────────────────────────────────────────────────
+// Set to true only when RelayFetch runs behind a trusted reverse proxy that
+// sets X-Forwarded-For. When false (default), REMOTE_ADDR is always used.
+define("TRUST_PROXY", false);

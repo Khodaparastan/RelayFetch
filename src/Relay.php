@@ -32,6 +32,12 @@ function relay_request(
   $responseCode = 200;
 
   $ch = curl_init($effectiveUrl);
+  if ($ch === false) {
+    http_response_code(502);
+    $logRecord["status"] = 502;
+    error_log("[Relay] Failed to initialise HTTP client for {$effectiveUrl}");
+    return;
+  }
 
   $opts = [
     CURLOPT_RETURNTRANSFER => false,
@@ -214,7 +220,6 @@ function is_api_request(): bool
     "application/json",
     "application/xml",
     "application/x-www-form-urlencoded",
-    "text/plain",
     "text/xml",
   ];
   foreach ($apiAcceptTypes as $type) {

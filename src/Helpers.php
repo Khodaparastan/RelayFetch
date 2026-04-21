@@ -93,18 +93,21 @@ function redact_url_secrets(string $url): string
 }
 
 /**
- * Resolve the client IP address, respecting common proxy headers when present.
+ * Resolve the client IP address.
+ * X-Forwarded-For is only trusted when TRUST_PROXY is defined and true;
+ * otherwise REMOTE_ADDR is always used.
  */
 function resolve_client_ip(): string
 {
-  // Trust X-Forwarded-For only if explicitly configured; default to REMOTE_ADDR.
   $remoteAddr = $_SERVER["REMOTE_ADDR"] ?? "";
-  $xff = trim($_SERVER["HTTP_X_FORWARDED_FOR"] ?? "");
-  if ($xff !== "") {
-    // Take the leftmost (client) entry from the XFF chain.
-    $first = trim(explode(",", $xff)[0]);
-    if (filter_var($first, FILTER_VALIDATE_IP) !== false) {
-      return $first;
+  if (defined("TRUST_PROXY") && TRUST_PROXY) {
+    $xff = trim($_SERVER["HTTP_X_FORWARDED_FOR"] ?? "");
+    if ($xff !== "") {
+      // Take the leftmost (client) entry from the XFF chain.
+      $first = trim(explode(",", $xff)[0]);
+      if (filter_var($first, FILTER_VALIDATE_IP) !== false) {
+        return $first;
+      }
     }
   }
   return $remoteAddr;

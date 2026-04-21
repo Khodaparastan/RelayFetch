@@ -84,7 +84,7 @@ function reset_metrics(): void
  */
 function format_bytes(int $bytes): string
 {
-  $units = ["B", "KB", "MB", "GB", "TB"];
+  $units = ["B", "KiB", "MiB", "GiB", "TiB"];
   $i = 0;
   $b = (float) $bytes;
   while ($b >= 1024 && $i < count($units) - 1) {

@@ -18,8 +18,8 @@ function validate_url(string $url): array
   $parsed = parse_url($url);
   $host = strtolower($parsed["host"] ?? "");
 
-  // Block loopback hostnames and literal IPv6 loopback address.
-  $ssrfBlockedHosts = ["localhost", "ip6-localhost", "ip6-loopback", "::1"];
+  // Block loopback hostnames and known IPv6 loopback/link-local literals.
+  $ssrfBlockedHosts = ["localhost", "ip6-localhost", "ip6-loopback", "::1", "0:0:0:0:0:0:0:1", "::ffff:127.0.0.1", "fe80::1"];
   if (in_array($host, $ssrfBlockedHosts, true)) {
     bail(400, "Bad Request", "Requests to that host are not allowed.");
   }
@@ -101,8 +101,8 @@ function revalidate_redirect(
     return ["host" => $originalHost, "resolvedIp" => $originalIp];
   }
 
-  // Block loopback hostnames and literal IPv6 loopback on the redirect target.
-  $ssrfBlockedHosts = ["localhost", "ip6-localhost", "ip6-loopback", "::1"];
+  // Block loopback hostnames and known IPv6 loopback/link-local literals.
+  $ssrfBlockedHosts = ["localhost", "ip6-localhost", "ip6-loopback", "::1", "0:0:0:0:0:0:0:1", "::ffff:127.0.0.1", "fe80::1"];
   if (in_array($effectiveHost, $ssrfBlockedHosts, true)) {
     bail(400, "Bad Request", "Redirect target host is not allowed.");
   }
@@ -157,12 +157,13 @@ function revalidate_redirect(
     bail(400, "Bad Request", "Redirect target file type is not allowed.");
   }
 
-  return ["host" => $effectiveHost, "resolvedIp" => $resolvedIp];
+  return ["host" => $effectiveHost, "resolvedIp" => $resolvedIp, "parsed" => parse_url($effectiveUrl)];
 }
 
 /**
  * Verify the secret token if SECRET_TOKEN is defined.
  * Accepts the token via X-Token request header or ?token= query parameter.
+ * Checks the global SECRET_TOKEN first, then the per-token store.
  */
 function verify_token(): void
 {
@@ -176,7 +177,19 @@ function verify_token(): void
   $queryToken  = $_GET["token"] ?? "";
   $provided    = $headerToken !== "" ? $headerToken : $queryToken;
 
-  if ($provided === "" || !hash_equals(SECRET_TOKEN, $provided)) {
+  if ($provided === "") {
     bail(403, "Forbidden", "Invalid or missing access token.");
   }
+
+  // Accept the global SECRET_TOKEN.
+  if (hash_equals(SECRET_TOKEN, $provided)) {
+    return;
+  }
+
+  // Also accept any token from the per-token store.
+  if (function_exists("tokens_verify") && tokens_verify($provided) !== null) {
+    return;
+  }
+
+  bail(403, "Forbidden", "Invalid or missing access token.");
 }

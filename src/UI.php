@@ -9,7 +9,7 @@ function show_ui(): void
   header("Referrer-Policy: no-referrer");
   header("Content-Security-Policy: default-src 'self'; style-src 'self'; script-src 'self'; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self';");
 
-  $tokenField = defined("SECRET_TOKEN")
+  $tokenField = (defined("SECRET_TOKEN") && SECRET_TOKEN !== "")
     ? '<div class="field">
         <label for="token">Access Token <span class="req">*</span></label>
         <div class="input-wrap">
@@ -31,7 +31,7 @@ function show_ui(): void
     "UTF-8",
   );
 
-  $authStatus = defined("SECRET_TOKEN") ? "token required" : "open";
+  $authStatus = (defined("SECRET_TOKEN") && SECRET_TOKEN !== "") ? "token required" : "open";
 
   echo <<<HTML
   <!DOCTYPE html>

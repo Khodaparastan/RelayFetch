@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 set_time_limit(0);
-ini_set("memory_limit", "64M");
+ini_set("memory_limit", "256M");
 
 require_once __DIR__ . "/config.php";
 require_once __DIR__ . "/src/Helpers.php";
@@ -104,7 +104,6 @@ verify_token();
 
 // ── Sanitise raw inputs ───────────────────────────────────────────────────────
 $url = trim(str_replace("\0", "", (string) $_GET["url"]));
-$url = urldecode($url);
 
 $logRecord["url"] = redact_url_secrets($url); // record URL with token redacted
 

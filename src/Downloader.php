@@ -23,6 +23,9 @@ function head_probe(string $url, string $host, string $resolvedIp): array
 {
   $urlPort = (int) (parse_url($url, PHP_URL_PORT) ?? 0) ?: null;
   $ch = curl_init($url);
+  if ($ch === false) {
+    bail(502, "Bad Gateway", "Failed to initialise HTTP client.");
+  }
   curl_setopt_array($ch, [
     CURLOPT_NOBODY => true,
     CURLOPT_RETURNTRANSFER => true,
@@ -58,6 +61,9 @@ function head_probe(string $url, string $host, string $resolvedIp): array
   // Fall back to a lightweight GET with an early abort to get metadata.
   if ($httpCode === 405 || ($httpCode !== 200 && $httpCode !== 206)) {
     $chGet = curl_init($url);
+    if ($chGet === false) {
+      bail(502, "Bad Gateway", "Failed to initialise HTTP client.");
+    }
     curl_setopt_array($chGet, [
       CURLOPT_RETURNTRANSFER => true,
       CURLOPT_FOLLOWLOCATION => true,
@@ -110,6 +116,9 @@ function fetch_filename_from_headers(
 ): string {
   $urlPort = (int) (parse_url($effectiveUrl, PHP_URL_PORT) ?? 0) ?: null;
   $ch = curl_init($effectiveUrl);
+  if ($ch === false) {
+    return "";
+  }
   curl_setopt_array($ch, [
     CURLOPT_NOBODY => true,
     CURLOPT_RETURNTRANSFER => true,
@@ -129,7 +138,7 @@ function fetch_filename_from_headers(
   curl_close($ch);
 
   if (
-    $rawHeaders &&
+    is_string($rawHeaders) &&
     preg_match(
       '/Content-Disposition:.*filename[^;=\n]*=\s*["\']?([^"\';\n]+)/i',
       $rawHeaders,
@@ -152,7 +161,7 @@ function stream_file(
   string $filename,
   string $mimeType,
   int $contentLength,
-): int {
+): array {
   $isRangeRequest = isset($_SERVER["HTTP_RANGE"]);
   $rangeHeader = $isRangeRequest ? $_SERVER["HTTP_RANGE"] : "";
 
@@ -184,6 +193,9 @@ function stream_file(
   $bytesStreamed = 0;
   $out = fopen("php://output", "wb");
   $dlCh = curl_init($effectiveUrl);
+  if ($dlCh === false) {
+    bail(502, "Bad Gateway", "Failed to initialise HTTP client.");
+  }
 
   $actualHttpStatus = 200;
   $opts = [
@@ -206,7 +218,11 @@ function stream_file(
     CURLOPT_WRITEFUNCTION => static function ($ch, $chunk) use ($out, &$bytesStreamed): int {
       $written = fwrite($out, $chunk);
       flush();
-      $len = $written === false ? 0 : strlen($chunk);
+      if ($written === false) {
+        error_log("[Downloader] fwrite failed for {$effectiveUrl}");
+        return 0; // returning 0 != strlen causes libcurl to abort
+      }
+      $len = strlen($chunk);
       $bytesStreamed += $len;
       return $len;
     },

@@ -28,7 +28,14 @@ function admin_is_authenticated(): bool
     $_SESSION = [];
     if (ini_get("session.use_cookies")) {
       $p = session_get_cookie_params();
-      setcookie(session_name(), "", time() - 42000, $p["path"], $p["domain"], $p["secure"], $p["httponly"]);
+      setcookie(session_name(), "", [
+        "expires"  => time() - 42000,
+        "path"     => $p["path"],
+        "domain"   => $p["domain"],
+        "secure"   => $p["secure"],
+        "httponly" => $p["httponly"],
+        "samesite" => "Strict",
+      ]);
     }
     session_destroy();
     return false;
@@ -46,6 +53,7 @@ function admin_login(string $password): bool
   }
   admin_session_start();
   session_regenerate_id(true);
+  unset($_SESSION["csrf_token"]); // force fresh CSRF token for the new authenticated session
   $_SESSION["admin_authed"] = true;
   $_SESSION["admin_ts"] = time();
   return true;
@@ -57,7 +65,14 @@ function admin_logout(): void
   $_SESSION = [];
   if (ini_get("session.use_cookies")) {
     $p = session_get_cookie_params();
-    setcookie(session_name(), "", time() - 42000, $p["path"], $p["domain"], $p["secure"], $p["httponly"]);
+    setcookie(session_name(), "", [
+      "expires"  => time() - 42000,
+      "path"     => $p["path"],
+      "domain"   => $p["domain"],
+      "secure"   => $p["secure"],
+      "httponly" => $p["httponly"],
+      "samesite" => "Strict",
+    ]);
   }
   session_destroy();
 }
@@ -90,6 +105,7 @@ function admin_gate(): void
     $_SERVER["REQUEST_METHOD"] === "POST" &&
     isset($_POST["admin_password"])
   ) {
+    csrf_token_verify();
     if (admin_login($_POST["admin_password"])) {
       header("Location: ?mode=admin");
       exit();
@@ -133,6 +149,7 @@ function admin_show_login(string $error = ""): void
   $errHtml = $error
     ? '<p class="admin-login-error">⚠ ' . htmlspecialchars($error) . "</p>"
     : "";
+  $csrfToken = htmlspecialchars(csrf_token_generate());
 
   echo <<<HTML
   <!DOCTYPE html>
@@ -142,14 +159,16 @@ function admin_show_login(string $error = ""): void
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>RelayFetch Admin</title>
     <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="admin.css">
   </head>
-  <body class="center">
+  <body class="admin-login">
     <div class="card admin-login-card">
       <h1 style="font-family:var(--font-mono);color:var(--accent);margin-bottom:1rem">
         <span style="color:var(--green)">$ </span>Admin Login
       </h1>
       {$errHtml}
-      <form method="post" action="?mode=admin">
+      <form method="post" action="?mode=admin" autocomplete="off">
+        <input type="hidden" name="csrf_token" value="{$csrfToken}">
         <div class="field">
           <label for="admin_password">Password</label>
           <div class="input-wrap">

@@ -66,6 +66,10 @@ function settings_save(array $post): array
       $errors[] = "{$key} must be >= 0.";
       continue;
     }
+    if ($key === "CHUNK_SIZE" && $val === 0) {
+      $errors[] = "CHUNK_SIZE must be greater than 0.";
+      continue;
+    }
     $ints[$key] = $val;
   }
 
@@ -363,8 +367,10 @@ function show_admin(): void
   }
 
   $flashHtml = $flash
-    ? '<div class="admin-flash">' . htmlspecialchars($flash) . "</div>"
+    ? '<div class="admin-flash"><span>' . htmlspecialchars($flash) . '</span><button class="admin-flash-close" onclick="this.parentElement.remove()" aria-label="Dismiss">&times;</button></div>'
     : "";
+
+  $csrfLogout = htmlspecialchars(csrf_token_generate());
 
   $content = match ($tab) {
     "requests" => admin_tab_requests(),
@@ -397,10 +403,10 @@ function show_admin(): void
       </nav>
       <div class="admin-sidebar-footer">
         <a href="?" class="admin-tab">← Back to App</a>
-        <form method="post" action="?mode=admin" style="display:inline">
+        <form method="post" action="?mode=admin">
           <input type="hidden" name="action" value="logout">
-          <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrf_token_generate()) ?>">
-          <button type="submit" class="admin-tab admin-logout" style="background:none;border:none;cursor:pointer;padding:0">Logout</button>
+          <input type="hidden" name="csrf_token" value="{$csrfLogout}">
+          <button type="submit" class="admin-logout">⏻ Logout</button>
         </form>
       </div>
     </aside>
@@ -487,7 +493,10 @@ function admin_tab_dashboard(array $m): string
 
   <div class="admin-card" style="margin-top:1.5rem">
     <div class="admin-card-header">Last 50 Requests — Status Sparkline</div>
-    <canvas id="sparkline" height="60" data-values='{$sparkData}'></canvas>
+    <div class="sparkline-wrap">
+      <canvas id="sparkline" height="60" data-values='{$sparkData}'></canvas>
+      <div class="sparkline-empty" id="sparkline-empty">No request data yet</div>
+    </div>
   </div>
 
   <div class="admin-card" style="margin-top:1rem">
@@ -505,9 +514,9 @@ function admin_tab_requests(): string
   $limit = 25;
   $offset = ($page - 1) * $limit;
 
-  $filterMethod = $_GET["method"] ?? "";
-  $filterStatus = $_GET["status"] ?? "";
-  $filterMode = $_GET["mode_f"] ?? "";
+  $filterMethod = preg_replace('/[^A-Z]/', '', strtoupper($_GET["method"] ?? ""));
+  $filterStatus = preg_replace('/[^0-9]/', '', $_GET["status"] ?? "");
+  $filterMode = preg_replace('/[^a-z]/', '', $_GET["mode_f"] ?? "");
 
   $filters = array_filter([
     "method" => $filterMethod ?: null,
@@ -551,14 +560,25 @@ function admin_tab_requests(): string
   <form method="get" action="" class="admin-filter-bar">
     <input type="hidden" name="mode" value="admin">
     <input type="hidden" name="tab"  value="requests">
-    <select name="method">{$methodOpts}</select>
-    <select name="status">{$statusOpts}</select>
-    <select name="mode_f">{$modeOpts}</select>
-    <button class="btn-sm" type="submit">Filter</button>
-    <a href="?mode=admin&tab=requests" class="btn-sm">Reset</a>
+    <div class="admin-filter-group">
+      <label for="filter-method">Method</label>
+      <select id="filter-method" name="method">{$methodOpts}</select>
+    </div>
+    <div class="admin-filter-group">
+      <label for="filter-status">Status</label>
+      <select id="filter-status" name="status">{$statusOpts}</select>
+    </div>
+    <div class="admin-filter-group">
+      <label for="filter-mode">Mode</label>
+      <select id="filter-mode" name="mode_f">{$modeOpts}</select>
+    </div>
+    <div class="admin-filter-actions">
+      <button class="btn-sm" type="submit">Filter</button>
+      <a href="?mode=admin&tab=requests" class="btn-sm">Reset</a>
+    </div>
   </form>
 
-  {$tableHtml}
+  <div class="admin-table-wrap">{$tableHtml}</div>
   {$pagerHtml}
   HTML;
 }
@@ -570,6 +590,7 @@ function admin_tab_cache(): string
   $count = count($entries);
   $totalSize = format_bytes(cache_size());
 
+  $csrfField = '<input type="hidden" name="csrf_token" value="' . htmlspecialchars(csrf_token_generate()) . '">';
   $rows = "";
   foreach ($entries as $e) {
     $url = htmlspecialchars($e["url"] ?? "");
@@ -580,8 +601,6 @@ function admin_tab_cache(): string
       : $e["ttl_left"] . "s";
     $cached = date("H:i:s", $e["cached_at"] ?? 0);
     $mime = htmlspecialchars($e["mime"] ?? "");
-
-    $csrfField = '<input type="hidden" name="csrf_token" value="' . htmlspecialchars(csrf_token_generate()) . '">';
     $rows .= <<<HTML
     <tr>
       <td class="td-url" title="{$url}">{$url}</td>
@@ -635,7 +654,7 @@ function admin_tab_cache(): string
     <div class="metric-card"><div class="metric-label">Cache Dir</div><div class="metric-value" style="font-size:.75rem">data/cache</div></div>
   </div>
 
-  <div class="admin-card">
+  <div class="admin-card"><div class="admin-table-wrap">
     <table class="admin-table">
       <thead>
         <tr>
@@ -644,7 +663,7 @@ function admin_tab_cache(): string
       </thead>
       <tbody>{$rows}</tbody>
     </table>
-  </div>
+  </div></div>
   HTML;
 }
 
@@ -652,6 +671,7 @@ function admin_tab_cache(): string
 function admin_tab_tokens(): string
 {
   $tokens = tokens_list();
+  $csrfField = '<input type="hidden" name="csrf_token" value="' . htmlspecialchars(csrf_token_generate()) . '">';
   $rows = "";
 
   foreach ($tokens as $t) {
@@ -662,8 +682,6 @@ function admin_tab_tokens(): string
     $methods = htmlspecialchars(implode(", ", $t["methods"] ?? ["*"]));
     $created = date("Y-m-d", $t["created_at"] ?? 0);
     $uses = (int) ($t["uses"] ?? 0);
-
-    $csrfField = '<input type="hidden" name="csrf_token" value="' . htmlspecialchars(csrf_token_generate()) . '">';
     $rows .= <<<HTML
     <tr>
       <td>{$label}</td>
@@ -735,14 +753,14 @@ function admin_tab_tokens(): string
     </form>
   </div>
 
-  <div class="admin-card">
+  <div class="admin-card"><div class="admin-table-wrap">
     <table class="admin-table">
       <thead>
         <tr><th>Label</th><th>Token</th><th>Hosts</th><th>Methods</th><th>Uses</th><th>Created</th><th></th></tr>
       </thead>
       <tbody>{$rows}</tbody>
     </table>
-  </div>
+  </div></div>
   HTML;
 }
 
@@ -1028,7 +1046,7 @@ function render_request_table(array $records): string
   }
 
   return <<<HTML
-  <div class="admin-card">
+  <div class="admin-card"><div class="admin-table-wrap">
     <table class="admin-table">
       <thead>
         <tr>
@@ -1038,7 +1056,7 @@ function render_request_table(array $records): string
       </thead>
       <tbody>{$rows}</tbody>
     </table>
-  </div>
+  </div></div>
   HTML;
 }
 
